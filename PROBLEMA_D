@@ -1,1 +1,107 @@
+#define F_CPU 16000000UL
 
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/power.h>
+#include <avr/eeprom.h>
+#include <util/delay.h>
+#include <stdint.h>
+#define MAX_NIVEL 10
+#define COLOR_ROJO      0
+#define COLOR_VERDE     1
+#define COLOR_AZUL      2
+#define COLOR_AMARILLO  3
+uint8_t secuencia[MAX_NIVEL];
+uint8_t colores[MAX_NIVEL];
+uint16_t lfsr = 0xACE1u;
+uint8_t EEMEM ee_nivel;
+uint8_t EEMEM ee_record;
+
+/*==WS2812B - DATA EN PD6==*/
+static void WS2812_EnviarByte(uint8_t dato)
+
+{
+    uint8_t contador = 8;
+    asm volatile (
+        "1:                         \n\t"
+        "sbi %[puerto], %[pin]      \n\t"
+        "sbrc %[dato], 7            \n\t"
+        "rjmp 2f                    \n\t"
+        "cbi %[puerto], %[pin]      \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "rjmp 3f                    \n\t"
+        "2:                         \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "cbi %[puerto], %[pin]      \n\t"
+        "nop                        \n\t"
+        "nop                        \n\t"
+        "3:                         \n\t"
+        "lsl %[dato]                \n\t"
+        "dec %[contador]            \n\t"
+        "brne 1b                    \n\t"
+        : [dato] "+r" (dato), [contador] "+r" (contador)
+        : [puerto] "I" (_SFR_IO_ADDR(PORTD)), [pin] "I" (PD6)
+    );
+}
+static void WS2812_Pixel(uint8_t r, uint8_t g, uint8_t b)
+{
+    WS2812_EnviarByte(g);
+    WS2812_EnviarByte(r);
+    WS2812_EnviarByte(b);
+}
+static void WS2812_Reset(void)
+{
+    PORTD &= ~(1 << PD6);
+    _delay_us(100);
+}
+
+/*= ADC joystick =*/
+static void ADC_Init(void)
+{
+    ADMUX = (1 << REFS0);
+    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+}
+static uint16_t ADC_Leer(uint8_t canal)
+{
+    ADMUX = (ADMUX & 0xF0) | canal;
+    ADCSRA |= (1 << ADSC);
+    while (ADCSRA & (1 << ADSC));
+    return ADC;
+}
+/*=Buzzer PD3 / OC2B=*/
+static void Buzzer_Iniciar(uint8_t color)
+{
+    uint8_t top;
+    switch (color)
+    {
+        case COLOR_ROJO:     top = 238; break;
+        case COLOR_VERDE:    top = 189; break;
+        case COLOR_AZUL:     top = 159; break;
+        default:             top = 126; break;
+    }
+    OCR2A = top;
+    OCR2B = top / 2;
+    TCCR2A = (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
+    TCCR2B = (1 << WGM22) | (1 << CS22) | (1 << CS20);
+}
+static void Buzzer_Parar(void)
+{
+    TCCR2A = 0;
+    TCCR2B = 0;
+    PORTD &= ~(1 << PD3);
+}
+static void Buzzer_Error(void)
+{
+    OCR2A = 249;
+    OCR2B = 124;
+    TCCR2A = (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
+    TCCR2B = (1 << WGM22) | (1 << CS22) | (1 << CS21);
+}
