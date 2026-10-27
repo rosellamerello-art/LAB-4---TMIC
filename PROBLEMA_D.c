@@ -410,9 +410,11 @@ int main(void)
     lfsr ^= ((uint16_t)ADC_Leer(1) << 5);
     GenerarSecuencia(nivel);
 
-    while (1)
-    {
-        MostrarSecuencia(nivel);
+ while (1)
+{
+    ModoLibre();
+
+    MostrarSecuencia(nivel);
         fila = 3;
         columna = 3;
         posicionActual = fila * 8 + columna;
