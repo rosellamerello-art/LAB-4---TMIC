@@ -105,3 +105,285 @@ static void Buzzer_Error(void)
     TCCR2A = (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
     TCCR2B = (1 << WGM22) | (1 << CS22) | (1 << CS21);
 }
+
+/*=Matriz=*/
+
+static void MostrarPixel(uint8_t posicion, uint8_t r, uint8_t g, uint8_t b)
+{
+    uint8_t i;
+    cli();
+    for (i = 0; i < 64; i++)
+    {
+        if (i == posicion) WS2812_Pixel(r, g, b);
+        else WS2812_Pixel(0,0,0);
+    }
+    sei();
+    WS2812_Reset();
+}
+static void MostrarPixelColor(uint8_t posicion, uint8_t color)
+{
+    switch (color)
+    {
+        case COLOR_ROJO:     MostrarPixel(posicion,100,0,0); break;
+        case COLOR_VERDE:    MostrarPixel(posicion,0,100,0); break;
+        case COLOR_AZUL:     MostrarPixel(posicion,0,0,100); break;
+        case COLOR_AMARILLO: MostrarPixel(posicion,100,100,0); break;
+    }
+}
+static void ApagarMatriz(void)
+{
+    uint8_t i;
+    cli();
+    for (i = 0; i < 64; i++) WS2812_Pixel(0,0,0);
+    sei();
+    WS2812_Reset();
+}
+static void MatrizColor(uint8_t r, uint8_t g, uint8_t b)
+{
+   uint8_t i;
+    cli();
+    for (i = 0; i < 64; i++) WS2812_Pixel(r,g,b);
+    sei();
+    WS2812_Reset();
+}
+
+static void MostrarRecord(uint8_t record)
+{
+    uint8_t i;
+    if (record > MAX_NIVEL) record = MAX_NIVEL;
+    cli();
+    for (i = 0; i < 64; i++)
+    {
+        if (i < record) WS2812_Pixel(0,100,0);
+        else WS2812_Pixel(0,0,0);
+    }
+    sei();
+    WS2812_Reset();
+    _delay_ms(1500);
+    ApagarMatriz();
+    _delay_ms(300);
+}
+static void ErrorRojo(void)
+{
+    uint8_t i;
+    Buzzer_Error();
+    for (i = 0; i < 3; i++)
+    {
+        MatrizColor(100,0,0);
+        _delay_ms(250);
+        ApagarMatriz();
+        _delay_ms(250);
+    }
+    Buzzer_Parar();
+}
+static void ExitoVerde(void)
+{
+    uint8_t i;
+    for (i = 0; i < 2; i++)
+    {
+        MatrizColor(0,80,0);
+        _delay_ms(200);
+        ApagarMatriz();
+        _delay_ms(200);
+    }
+}
+
+/*=Pseudoaleatorio=*/
+
+static uint8_t NumeroAleatorio(void)
+{
+    uint16_t bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+    lfsr = (lfsr >> 1) | (bit << 15);
+    return (uint8_t)(lfsr % 64);
+}
+static uint8_t ColorAleatorio(void)
+{
+    uint16_t bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+    lfsr = (lfsr >> 1) | (bit << 15);
+    return (uint8_t)(lfsr % 4);
+}
+
+static void GenerarSecuencia(uint8_t cantidad)
+{
+    uint8_t i;
+    for (i = 0; i < cantidad; i++)
+    {
+        secuencia[i] = NumeroAleatorio();
+        colores[i] = ColorAleatorio();
+    }
+}
+static void MostrarSecuencia(uint8_t nivel)
+{
+    uint8_t i;
+    ApagarMatriz();
+    _delay_ms(500);
+    for (i = 0; i < nivel; i++)
+    {
+        MostrarPixelColor(secuencia[i], colores[i]);
+        Buzzer_Iniciar(colores[i]);
+        _delay_ms(500);
+        Buzzer_Parar();
+        ApagarMatriz();
+        _delay_ms(200);
+    }
+}
+
+int main(void)
+{
+    uint8_t nivel;
+    uint8_t record;
+    uint8_t indiceJugador;
+    uint8_t fila;
+    uint8_t columna;
+    uint8_t posicionActual;
+    uint16_t ejeX;
+    uint16_t ejeY;
+    uint8_t error;
+     cli();
+    clock_prescale_set(clock_div_1);
+    sei();
+
+    // Matriz D6
+
+    DDRD |= (1 << PD6);
+    PORTD &= ~(1 << PD6);
+
+    // Buzzer D3
+
+    DDRD |= (1 << PD3);
+    PORTD &= ~(1 << PD3);
+ 
+   // BTN A D2
+
+    DDRD &= ~(1 << PD2);
+    PORTD |= (1 << PD2);
+    ADC_Init();
+    _delay_ms(500);
+    nivel = eeprom_read_byte(&ee_nivel);
+    record = eeprom_read_byte(&ee_record);
+    if (nivel == 0xFF || nivel == 0 || nivel > MAX_NIVEL)
+    {
+        nivel = 1;
+        eeprom_update_byte(&ee_nivel, nivel);
+    }
+ 
+    if (record == 0xFF || record > MAX_NIVEL)
+    {
+        record = 0;
+        eeprom_update_byte(&ee_record, record);
+    }
+ 
+    MostrarRecord(record);
+
+    lfsr ^= ADC_Leer(0);
+    lfsr ^= ((uint16_t)ADC_Leer(1) << 5);
+    GenerarSecuencia(nivel);
+
+    while (1)
+    {
+        MostrarSecuencia(nivel);
+        fila = 3;
+        columna = 3;
+        posicionActual = fila * 8 + columna;
+        MostrarPixel(posicionActual,80,0,0);
+        indiceJugador = 0;
+        error = 0;
+        while (indiceJugador < nivel)
+        {
+            ejeX = ADC_Leer(0);
+            ejeY = ADC_Leer(1);
+
+            if (ejeX > 700)
+            {
+                if (columna < 7) columna++;
+                posicionActual = fila * 8 + columna;
+                MostrarPixel(posicionActual,80,0,0);
+                _delay_ms(250);
+            }
+            else if (ejeX < 300)
+            {
+                if (columna > 0) columna--;
+                posicionActual = fila * 8 + columna;
+                MostrarPixel(posicionActual,80,0,0);
+                _delay_ms(250);
+            }
+            else if (ejeY < 300) // Y invertido en PICSimLab
+            {
+                if (fila < 7) fila++;
+                posicionActual = fila * 8 + columna;
+                MostrarPixel(posicionActual,80,0,0);
+                _delay_ms(250);
+            }
+            else if (ejeY > 700)
+            {
+                if (fila > 0) fila--;
+                posicionActual = fila * 8 + columna;
+                MostrarPixel(posicionActual,80,0,0);
+                _delay_ms(250);
+            }
+ 
+            if (!(PIND & (1 << PD2)))
+            {
+                posicionActual = fila * 8 + columna;
+                if (posicionActual == secuencia[indiceJugador])
+
+                {
+                    MostrarPixel(posicionActual,0,100,0);
+                    _delay_ms(300);
+                    indiceJugador++;
+ 
+                    while (!(PIND & (1 << PD2)));
+                    _delay_ms(50);
+                    if (indiceJugador < nivel)
+                        MostrarPixel(posicionActual,80,0,0);
+                }
+                else
+                {
+                    error = 1;
+                    while (!(PIND & (1 << PD2)));
+                    break;
+                }
+            }
+        }
+ 
+        if (error)
+        {
+            ErrorRojo();
+            nivel = 1;
+            eeprom_update_byte(&ee_nivel, nivel);
+            GenerarSecuencia(1);
+            _delay_ms(500);
+        }
+        else
+        {
+            ExitoVerde();
+            if (nivel > record)
+            {
+                record = nivel;
+                eeprom_update_byte(&ee_record, record);
+            }
+
+            if (nivel < MAX_NIVEL)
+            {
+                secuencia[nivel] = NumeroAleatorio();
+                colores[nivel] = ColorAleatorio();
+                nivel++;
+                eeprom_update_byte(&ee_nivel, nivel);
+            }
+            else
+            {
+                MatrizColor(100,100,0);
+                _delay_ms(1000);
+                ApagarMatriz();
+                record = MAX_NIVEL;
+                eeprom_update_byte(&ee_record, record);
+                nivel = 1;
+                eeprom_update_byte(&ee_nivel, nivel);
+                GenerarSecuencia(1);
+
+            }
+
+            _delay_ms(600);
+        }
+    }
+}
