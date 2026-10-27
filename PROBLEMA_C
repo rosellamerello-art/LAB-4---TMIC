@@ -1,587 +1,575 @@
-#define F_CPU 16000000UL 
-  
-#include <avr/io.h> 
-#include <avr/interrupt.h> 
-#include <avr/power.h> 
-#include <util/delay.h> 
-#include <stdint.h> #define F_CPU 16000000UL 
-  
-#include <avr/io.h> 
-#include <avr/interrupt.h> 
-#include <avr/power.h> 
-#include <util/delay.h> 
-#include <stdint.h> 
-  
-/* ===================================================== 
-   PROBLEMA C - ALARMA ANTIRROBO HC-05 
-   ATmega328P 
-  
-   PC0/A0  LDR ventana 
-   PD2     PIR/boton presencia (activo en 0) 
-   PD4     LED verde ARMADO 
-   PD5     LED rojo ALARMA 
-   PD6     Buzzer/sirena (por transistor) 
-   PD0 RX  HC-05 TX 
-   PD1 TX  HC-05 RX (usar divisor de tension en fisico) 
-  
-   Comandos: 
-   A = ARMAR 
-   D = DESARMAR 
-   S = SILENCIAR 
-   U = AUTO 
-   M = MANUAL 
-   F = FORZAR ALARMA en manual 
-   E = ESTADO 
-   ===================================================== */ 
-  
-#define LDR_UMBRAL 500 
-  
-static uint8_t armado = 0; 
-static uint8_t modo_auto = 1; 
-static uint8_t alarma = 0; 
-static uint8_t sirena = 0; 
-static uint8_t presencia_anterior = 1; 
-static uint8_t ldr_ventana_abierta = 0; 
-  
-typedef enum 
-{ 
-    ZONA_NINGUNA = 0, 
-    ZONA_VENTANA, 
-    ZONA_PRESENCIA, 
-    ZONA_REMOTA 
-} zona_t; 
-  
-static zona_t zona = ZONA_NINGUNA; 
-  
-/* ---------------- UART 9600 ---------------- */ 
-  
-static void UART_Init(void) 
-{ 
-    UBRR0H = 0; 
-    UBRR0L = 103; 
-    UCSR0B = (1 << RXEN0) | (1 << TXEN0); 
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); 
-} 
-  
-static void UART_EnviarChar(char c) 
-{ 
-    while (!(UCSR0A & (1 << UDRE0))); 
-    UDR0 = c; 
-} 
-  
-static void UART_EnviarTexto(const char *s) 
-{ 
-    while (*s) UART_EnviarChar(*s++); 
-} 
-  
-static uint8_t UART_Disponible(void) 
-{ 
-    return (UCSR0A & (1 << RXC0)) != 0; 
-} 
-  
-static char UART_LeerChar(void) 
-{ 
-    return UDR0; 
-} 
-  
-/* ---------------- ADC ---------------- */ 
-  
-static void ADC_Init(void) 
-{ 
-    ADMUX = (1 << REFS0); 
-    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); 
-} 
-  
-static uint16_t ADC_Leer(uint8_t canal) 
-{ 
-    ADMUX = (ADMUX & 0xF0) | (canal & 0x0F); 
-    ADCSRA |= (1 << ADSC); 
-    while (ADCSRA & (1 << ADSC)); 
-    return ADC; 
-} 
-  
-/* ---------------- Salidas ---------------- */ 
-  
-static void ActualizarSalidas(void) 
-{ 
-    if (armado) 
-        PORTD |= (1 << PD4); 
-    else 
-        PORTD &= ~(1 << PD4); 
-  
-    if (alarma) 
-        PORTD |= (1 << PD5); 
+#define F_CPU 16000000UL
 
-    else 
-        PORTD &= ~(1 << PD5); 
-  
-    if (sirena) 
-        PORTD |= (1 << PD6); 
-    else 
-        PORTD &= ~(1 << PD6); 
-} 
-  
-static const char *NombreZona(void) 
-{ 
-    switch (zona) 
-    { 
-        case ZONA_VENTANA: return "VENTANA"; 
-        case ZONA_PRESENCIA: return "PRESENCIA"; 
-        case ZONA_REMOTA: return "REMOTA"; 
-        default: return "NINGUNA"; 
-    } 
-} 
-  
-static void ReportarEstado(void) 
-{ 
-    UART_EnviarTexto("ESTADO:"); 
-    UART_EnviarTexto(armado ? "ARMADO\r\n" : "DESARMADO\r\n"); 
-  
-    UART_EnviarTexto("MODO:"); 
-    UART_EnviarTexto(modo_auto ? "AUTO\r\n" : "MANUAL\r\n"); 
-  
-    UART_EnviarTexto("ALARMA:"); 
-    UART_EnviarTexto(alarma ? "ON\r\n" : "OFF\r\n"); 
-  
-    UART_EnviarTexto("SIRENA:"); 
-    UART_EnviarTexto(sirena ? "ON\r\n" : "OFF\r\n"); 
-  
-    UART_EnviarTexto("ZONA:"); 
-    UART_EnviarTexto(NombreZona()); 
-    UART_EnviarTexto("\r\n"); 
-} 
-  
-static void DispararAlarma(zona_t nueva_zona) 
-{ 
-    if (!armado) return; 
-  
-    zona = nueva_zona; 
-    alarma = 1; 
-    sirena = 1; 
-    ActualizarSalidas(); 
-  
-    UART_EnviarTexto("ALARMA:ON;ZONA:"); 
-    UART_EnviarTexto(NombreZona()); 
-    UART_EnviarTexto("\r\n"); 
-} 
-  
-static void Desarmar(void) 
-{ 
-    armado = 0; 
-    alarma = 0; 
-    sirena = 0; 
-    zona = ZONA_NINGUNA; 
-    ActualizarSalidas(); 
-    UART_EnviarTexto("ESTADO:DESARMADO\r\n"); 
-} 
-  
-static void Armar(void) 
-{ 
-    armado = 1; 
-    alarma = 0; 
-    sirena = 0; 
-    zona = ZONA_NINGUNA; 
-    ActualizarSalidas(); 
+ 
 
-    UART_EnviarTexto("ESTADO:ARMADO\r\n"); 
-} 
-  
-static void ProcesarComando(char c) 
-{ 
-    switch (c) 
-    { 
-        case 'A': 
-        case 'a': 
-            Armar(); 
-            break; 
-  
-        case 'D': 
-        case 'd': 
-            Desarmar(); 
-            break; 
-  
-        case 'S': 
-        case 's': 
-            // Silencia la sirena sin desarmar ni borrar el evento 
-            sirena = 0; 
-            ActualizarSalidas(); 
-            UART_EnviarTexto("SIRENA:OFF\r\n"); 
-            break; 
-  
-        case 'U': 
-        case 'u': 
-            modo_auto = 1; 
-            UART_EnviarTexto("MODO:AUTO\r\n"); 
-            break; 
-  
-        case 'M': 
-        case 'm': 
-            modo_auto = 0; 
-            UART_EnviarTexto("MODO:MANUAL\r\n"); 
-            break; 
-  
-        case 'F': 
-        case 'f': 
-            if (!modo_auto && armado) 
-                DispararAlarma(ZONA_REMOTA); 
-            break; 
-  
-        case 'E': 
-        case 'e': 
-            ReportarEstado(); 
-            break; 
-  
-        default: 
-            break; 
-    } 
-} 
-  
-int main(void) 
-{ 
-    uint16_t ldr; 
-    uint8_t presencia; 
-  
-    cli(); 
-    clock_prescale_set(clock_div_1); 
-    sei(); 
-  
-    // Presencia PD2 entrada con pull-up 
-    DDRD &= ~(1 << PD2); 
-    PORTD |= (1 << PD2); 
-  
-    // LEDs + buzzer 
-    DDRD |= (1 << PD4) | (1 << PD5) | (1 << PD6); 
-    PORTD &= ~((1 << PD4) | (1 << PD5) | (1 << PD6)); 
-  
+#include <avr/io.h>
 
-    ADC_Init(); 
-    UART_Init(); 
-  
-    UART_EnviarTexto("ALARMA HC-05 LISTA\r\n"); 
-    UART_EnviarTexto("A ARMAR | D DESARMAR | S SILENCIAR | U AUTO | M MANUAL | F FORZAR | E ESTADO\r\n"); 
-  
-    while (1) 
-    { 
-        if (UART_Disponible()) 
-            ProcesarComando(UART_LeerChar()); 
-  
-        ldr = ADC_Leer(0); 
-        presencia = (PIND & (1 << PD2)) ? 1 : 0; 
-  
-        if (modo_auto && armado && !alarma) 
-        { 
-            // LDR: valor bajo = apertura/ventana detectada 
-            if (!ldr_ventana_abierta && ldr < LDR_UMBRAL) 
-            { 
-                ldr_ventana_abierta = 1; 
-                DispararAlarma(ZONA_VENTANA); 
-            } 
-  
-            // Presencia: flanco hacia activo, con debounce basico 
-            if (presencia_anterior == 1 && presencia == 0) 
-            { 
-                _delay_ms(30); 
-                if (!(PIND & (1 << PD2))) 
-                    DispararAlarma(ZONA_PRESENCIA); 
-            } 
-        } 
-  
-        // Rearme del LDR para una futura deteccion 
-        if (ldr > (LDR_UMBRAL + 80)) 
-            ldr_ventana_abierta = 0; 
-  
-        presencia_anterior = presencia; 
-        ActualizarSalidas(); 
-        _delay_ms(20); 
-    } 
-} 
-  
+#include <avr/interrupt.h>
 
+#include <avr/power.h>
 
-  
-/* ===================================================== 
-   PROBLEMA C - ALARMA ANTIRROBO HC-05 
-   ATmega328P 
-  
-   PC0/A0  LDR ventana 
-   PD2     PIR/boton presencia (activo en 0) 
-   PD4     LED verde ARMADO 
-   PD5     LED rojo ALARMA 
-   PD6     Buzzer/sirena (por transistor) 
-   PD0 RX  HC-05 TX 
-   PD1 TX  HC-05 RX (usar divisor de tension en fisico) 
-  
-   Comandos: 
-   A = ARMAR 
-   D = DESARMAR 
-   S = SILENCIAR 
-   U = AUTO 
-   M = MANUAL 
-   F = FORZAR ALARMA en manual 
-   E = ESTADO 
-   ===================================================== */ 
-  
-#define LDR_UMBRAL 500 
-  
-static uint8_t armado = 0; 
-static uint8_t modo_auto = 1; 
-static uint8_t alarma = 0; 
-static uint8_t sirena = 0; 
-static uint8_t presencia_anterior = 1; 
-Laboratorio 4 — Compilado B/C/D/E 
-static uint8_t ldr_ventana_abierta = 0; 
-  
-typedef enum 
-{ 
-    ZONA_NINGUNA = 0, 
-    ZONA_VENTANA, 
-    ZONA_PRESENCIA, 
-    ZONA_REMOTA 
-} zona_t; 
-  
-static zona_t zona = ZONA_NINGUNA; 
-  
-/* ---------------- UART 9600 ---------------- */ 
-  
-static void UART_Init(void) 
-{ 
-    UBRR0H = 0; 
-    UBRR0L = 103; 
-    UCSR0B = (1 << RXEN0) | (1 << TXEN0); 
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); 
-} 
-  
-static void UART_EnviarChar(char c) 
-{ 
-    while (!(UCSR0A & (1 << UDRE0))); 
-    UDR0 = c; 
-} 
-  
-static void UART_EnviarTexto(const char *s) 
-{ 
-    while (*s) UART_EnviarChar(*s++); 
-} 
-  
-static uint8_t UART_Disponible(void) 
-{ 
-    return (UCSR0A & (1 << RXC0)) != 0; 
-} 
-  
-static char UART_LeerChar(void) 
-{ 
-    return UDR0; 
-} 
-  
-/* ---------------- ADC ---------------- */ 
-  
-static void ADC_Init(void) 
-{ 
-    ADMUX = (1 << REFS0); 
-    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); 
-} 
-  
-static uint16_t ADC_Leer(uint8_t canal) 
-{ 
-    ADMUX = (ADMUX & 0xF0) | (canal & 0x0F); 
-    ADCSRA |= (1 << ADSC); 
-    while (ADCSRA & (1 << ADSC)); 
-    return ADC; 
-} 
-  
-/* ---------------- Salidas ---------------- */ 
-  
-static void ActualizarSalidas(void) 
-{ 
-    if (armado) 
-        PORTD |= (1 << PD4); 
-    else 
-        PORTD &= ~(1 << PD4); 
-  
-    if (alarma) 
-        PORTD |= (1 << PD5); 
-Laboratorio 4 — Compilado B/C/D/E 
-    else 
-        PORTD &= ~(1 << PD5); 
-  
-    if (sirena) 
-        PORTD |= (1 << PD6); 
-    else 
-        PORTD &= ~(1 << PD6); 
-} 
-  
-static const char *NombreZona(void) 
-{ 
-    switch (zona) 
-    { 
-        case ZONA_VENTANA: return "VENTANA"; 
-        case ZONA_PRESENCIA: return "PRESENCIA"; 
-        case ZONA_REMOTA: return "REMOTA"; 
-        default: return "NINGUNA"; 
-    } 
-} 
-  
-static void ReportarEstado(void) 
-{ 
-    UART_EnviarTexto("ESTADO:"); 
-    UART_EnviarTexto(armado ? "ARMADO\r\n" : "DESARMADO\r\n"); 
-  
-    UART_EnviarTexto("MODO:"); 
-    UART_EnviarTexto(modo_auto ? "AUTO\r\n" : "MANUAL\r\n"); 
-  
-    UART_EnviarTexto("ALARMA:"); 
-    UART_EnviarTexto(alarma ? "ON\r\n" : "OFF\r\n"); 
-  
-    UART_EnviarTexto("SIRENA:"); 
-    UART_EnviarTexto(sirena ? "ON\r\n" : "OFF\r\n"); 
-  
-    UART_EnviarTexto("ZONA:"); 
-    UART_EnviarTexto(NombreZona()); 
-    UART_EnviarTexto("\r\n"); 
-} 
-  
-static void DispararAlarma(zona_t nueva_zona) 
-{ 
-    if (!armado) return; 
-  
-    zona = nueva_zona; 
-    alarma = 1; 
-    sirena = 1; 
-    ActualizarSalidas(); 
-  
-    UART_EnviarTexto("ALARMA:ON;ZONA:"); 
-    UART_EnviarTexto(NombreZona()); 
-    UART_EnviarTexto("\r\n"); 
-} 
-  
-static void Desarmar(void) 
-{ 
-    armado = 0; 
-    alarma = 0; 
-    sirena = 0; 
-    zona = ZONA_NINGUNA; 
-    ActualizarSalidas(); 
-    UART_EnviarTexto("ESTADO:DESARMADO\r\n"); 
-} 
-  
-static void Armar(void) 
-{ 
-    armado = 1; 
-    alarma = 0; 
-    sirena = 0; 
-    zona = ZONA_NINGUNA; 
-    ActualizarSalidas(); 
-Laboratorio 4 — Compilado B/C/D/E 
-    UART_EnviarTexto("ESTADO:ARMADO\r\n"); 
-} 
-  
-static void ProcesarComando(char c) 
-{ 
-    switch (c) 
-    { 
-        case 'A': 
-        case 'a': 
-            Armar(); 
-            break; 
-  
-        case 'D': 
-        case 'd': 
-            Desarmar(); 
-            break; 
-  
-        case 'S': 
-        case 's': 
-            // Silencia la sirena sin desarmar ni borrar el evento 
-            sirena = 0; 
-            ActualizarSalidas(); 
-            UART_EnviarTexto("SIRENA:OFF\r\n"); 
-            break; 
-  
-        case 'U': 
-        case 'u': 
-            modo_auto = 1; 
-            UART_EnviarTexto("MODO:AUTO\r\n"); 
-            break; 
-  
-        case 'M': 
-        case 'm': 
-            modo_auto = 0; 
-            UART_EnviarTexto("MODO:MANUAL\r\n"); 
-            break; 
-  
-        case 'F': 
-        case 'f': 
-            if (!modo_auto && armado) 
-                DispararAlarma(ZONA_REMOTA); 
-            break; 
-  
-        case 'E': 
-        case 'e': 
-            ReportarEstado(); 
-            break; 
-  
-        default: 
-            break; 
-    } 
-} 
-  
-int main(void) 
-{ 
-    uint16_t ldr; 
-    uint8_t presencia; 
-  
-    cli(); 
-    clock_prescale_set(clock_div_1); 
-    sei(); 
-  
-    // Presencia PD2 entrada con pull-up 
-    DDRD &= ~(1 << PD2); 
-    PORTD |= (1 << PD2); 
-  
-    // LEDs + buzzer 
-    DDRD |= (1 << PD4) | (1 << PD5) | (1 << PD6); 
-    PORTD &= ~((1 << PD4) | (1 << PD5) | (1 << PD6)); 
-  
-Laboratorio 4 — Compilado B/C/D/E 
-    ADC_Init(); 
-    UART_Init(); 
-  
-    UART_EnviarTexto("ALARMA HC-05 LISTA\r\n"); 
-    UART_EnviarTexto("A ARMAR | D DESARMAR | S SILENCIAR | U AUTO | M MANUAL | F FORZAR | E ESTADO\r\n"); 
-  
-    while (1) 
-    { 
-        if (UART_Disponible()) 
-            ProcesarComando(UART_LeerChar()); 
-  
-        ldr = ADC_Leer(0); 
-        presencia = (PIND & (1 << PD2)) ? 1 : 0; 
-  
-        if (modo_auto && armado && !alarma) 
-        { 
-            // LDR: valor bajo = apertura/ventana detectada 
-            if (!ldr_ventana_abierta && ldr < LDR_UMBRAL) 
-            { 
-                ldr_ventana_abierta = 1; 
-                DispararAlarma(ZONA_VENTANA); 
-            } 
-  
-            // Presencia: flanco hacia activo, con debounce basico 
-            if (presencia_anterior == 1 && presencia == 0) 
-            { 
-                _delay_ms(30); 
-                if (!(PIND & (1 << PD2))) 
-                    DispararAlarma(ZONA_PRESENCIA); 
-            } 
-        } 
-  
-        // Rearme del LDR para una futura deteccion 
-        if (ldr > (LDR_UMBRAL + 80)) 
-            ldr_ventana_abierta = 0; 
-  
-        presencia_anterior = presencia; 
-        ActualizarSalidas(); 
-        _delay_ms(20); 
-    } 
-} 
-  
+#include <util/delay.h>
 
+#include <stdint.h>
+
+ 
+
+/* =====================================================
+
+   PROBLEMA C - ALARMA ANTIRROBO HC-05
+
+   ATmega328P
+
+ 
+
+   PC0/A0  LDR ventana
+
+   PD2     PIR/boton presencia (activo en 0)
+
+   PD4     LED verde ARMADO
+
+   PD5     LED rojo ALARMA
+
+   PD6     Buzzer/sirena (por transistor)
+
+   PD0 RX  HC-05 TX
+
+   PD1 TX  HC-05 RX (usar divisor de tension en fisico)
+
+ 
+
+   Comandos:
+
+   A = ARMAR
+
+   D = DESARMAR
+
+   S = SILENCIAR
+
+   U = AUTO
+
+   M = MANUAL
+
+   F = FORZAR ALARMA en manual
+
+   E = ESTADO
+
+   ===================================================== */
+
+ 
+
+#define LDR_UMBRAL 500
+
+ 
+
+static uint8_t armado = 0;
+
+static uint8_t modo_auto = 1;
+
+static uint8_t alarma = 0;
+
+static uint8_t sirena = 0;
+
+static uint8_t presencia_anterior = 1;
+
+static uint8_t ldr_ventana_abierta = 0;
+
+ 
+
+typedef enum
+
+{
+
+    ZONA_NINGUNA = 0,
+
+    ZONA_VENTANA,
+
+    ZONA_PRESENCIA,
+
+    ZONA_REMOTA
+
+} zona_t;
+
+ 
+
+static zona_t zona = ZONA_NINGUNA;
+
+ 
+
+/* ---------------- UART 9600 ---------------- */
+
+ 
+
+static void UART_Init(void)
+
+{
+
+    UBRR0H = 0;
+
+    UBRR0L = 103;
+
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+
+}
+
+ 
+
+static void UART_EnviarChar(char c)
+
+{
+
+    while (!(UCSR0A & (1 << UDRE0)));
+
+    UDR0 = c;
+
+}
+
+ 
+
+static void UART_EnviarTexto(const char *s)
+
+{
+
+    while (*s) UART_EnviarChar(*s++);
+
+}
+
+ 
+
+static uint8_t UART_Disponible(void)
+
+{
+
+    return (UCSR0A & (1 << RXC0)) != 0;
+
+}
+
+ 
+
+static char UART_LeerChar(void)
+
+{
+
+    return UDR0;
+
+}
+
+ 
+
+/* ---------------- ADC ---------------- */
+
+ 
+
+static void ADC_Init(void)
+
+{
+
+    ADMUX = (1 << REFS0);
+
+    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+
+}
+
+ 
+
+static uint16_t ADC_Leer(uint8_t canal)
+
+{
+
+    ADMUX = (ADMUX & 0xF0) | (canal & 0x0F);
+
+    ADCSRA |= (1 << ADSC);
+
+    while (ADCSRA & (1 << ADSC));
+
+    return ADC;
+
+}
+
+ 
+
+/* ---------------- Salidas ---------------- */
+
+ 
+
+static void ActualizarSalidas(void)
+
+{
+
+    if (armado)
+
+        PORTD |= (1 << PD4);
+
+    else
+
+        PORTD &= ~(1 << PD4);
+
+ 
+
+    if (alarma)
+
+        PORTD |= (1 << PD5);
+
+    else
+
+        PORTD &= ~(1 << PD5);
+
+ 
+
+    if (sirena)
+
+        PORTD |= (1 << PD6);
+
+    else
+
+        PORTD &= ~(1 << PD6);
+
+}
+
+ 
+
+static const char *NombreZona(void)
+
+{
+
+    switch (zona)
+
+    {
+
+        case ZONA_VENTANA: return "VENTANA";
+
+        case ZONA_PRESENCIA: return "PRESENCIA";
+
+        case ZONA_REMOTA: return "REMOTA";
+
+        default: return "NINGUNA";
+
+    }
+
+}
+
+ 
+
+static void ReportarEstado(void)
+
+{
+
+    UART_EnviarTexto("ESTADO:");
+
+    UART_EnviarTexto(armado ? "ARMADO\r\n" : "DESARMADO\r\n");
+
+ 
+
+    UART_EnviarTexto("MODO:");
+
+    UART_EnviarTexto(modo_auto ? "AUTO\r\n" : "MANUAL\r\n");
+
+ 
+
+    UART_EnviarTexto("ALARMA:");
+
+    UART_EnviarTexto(alarma ? "ON\r\n" : "OFF\r\n");
+
+ 
+
+    UART_EnviarTexto("SIRENA:");
+
+    UART_EnviarTexto(sirena ? "ON\r\n" : "OFF\r\n");
+
+ 
+
+    UART_EnviarTexto("ZONA:");
+
+    UART_EnviarTexto(NombreZona());
+
+    UART_EnviarTexto("\r\n");
+
+}
+
+ 
+
+static void DispararAlarma(zona_t nueva_zona)
+
+{
+
+    if (!armado) return;
+
+ 
+
+    zona = nueva_zona;
+
+    alarma = 1;
+
+    sirena = 1;
+
+    ActualizarSalidas();
+
+ 
+
+    UART_EnviarTexto("ALARMA:ON;ZONA:");
+
+    UART_EnviarTexto(NombreZona());
+
+    UART_EnviarTexto("\r\n");
+
+}
+
+ 
+
+static void Desarmar(void)
+
+{
+
+    armado = 0;
+
+    alarma = 0;
+
+    sirena = 0;
+
+    zona = ZONA_NINGUNA;
+
+    ActualizarSalidas();
+
+    UART_EnviarTexto("ESTADO:DESARMADO\r\n");
+
+}
+
+ 
+
+static void Armar(void)
+
+{
+
+    armado = 1;
+
+    alarma = 0;
+
+    sirena = 0;
+
+    zona = ZONA_NINGUNA;
+
+    ActualizarSalidas();
+
+    UART_EnviarTexto("ESTADO:ARMADO\r\n");
+
+}
+
+ 
+
+static void ProcesarComando(char c)
+
+{
+
+    switch (c)
+
+    {
+
+        case 'A':
+
+        case 'a':
+
+            Armar();
+
+            break;
+
+ 
+
+        case 'D':
+
+        case 'd':
+
+            Desarmar();
+
+            break;
+
+ 
+
+        case 'S':
+
+        case 's':
+
+            // Silencia la sirena sin desarmar ni borrar el evento
+
+            sirena = 0;
+
+            ActualizarSalidas();
+
+            UART_EnviarTexto("SIRENA:OFF\r\n");
+
+            break;
+
+ 
+
+        case 'U':
+
+        case 'u':
+
+            modo_auto = 1;
+
+            UART_EnviarTexto("MODO:AUTO\r\n");
+
+            break;
+
+ 
+
+        case 'M':
+
+        case 'm':
+
+            modo_auto = 0;
+
+            UART_EnviarTexto("MODO:MANUAL\r\n");
+
+            break;
+
+ 
+
+        case 'F':
+
+        case 'f':
+
+            if (!modo_auto && armado)
+
+                DispararAlarma(ZONA_REMOTA);
+
+            break;
+
+ 
+
+        case 'E':
+
+        case 'e':
+
+            ReportarEstado();
+
+            break;
+
+ 
+
+        default:
+
+            break;
+
+    }
+
+}
+
+ 
+
+int main(void)
+
+{
+
+    uint16_t ldr;
+
+    uint8_t presencia;
+
+ 
+
+    cli();
+
+    clock_prescale_set(clock_div_1);
+
+    sei();
+
+ 
+
+    // Presencia PD2 entrada con pull-up
+
+    DDRD &= ~(1 << PD2);
+
+    PORTD |= (1 << PD2);
+
+ 
+
+    // LEDs + buzzer
+
+    DDRD |= (1 << PD4) | (1 << PD5) | (1 << PD6);
+
+    PORTD &= ~((1 << PD4) | (1 << PD5) | (1 << PD6));
+
+ 
+
+    ADC_Init();
+
+    UART_Init();
+
+ 
+
+    UART_EnviarTexto("ALARMA HC-05 LISTA\r\n");
+
+    UART_EnviarTexto("A ARMAR | D DESARMAR | S SILENCIAR | U AUTO | M MANUAL | F FORZAR | E ESTADO\r\n");
+
+ 
+
+    while (1)
+
+    {
+
+        if (UART_Disponible())
+
+            ProcesarComando(UART_LeerChar());
+
+ 
+
+        ldr = ADC_Leer(0);
+
+        presencia = (PIND & (1 << PD2)) ? 1 : 0;
+
+ 
+
+        if (modo_auto && armado && !alarma)
+
+        {
+
+            // LDR: valor bajo = apertura/ventana detectada
+
+            if (!ldr_ventana_abierta && ldr < LDR_UMBRAL)
+
+            {
+
+                ldr_ventana_abierta = 1;
+
+                DispararAlarma(ZONA_VENTANA);
+
+            }
+
+ 
+
+            // Presencia: flanco hacia activo, con debounce basico
+
+            if (presencia_anterior == 1 && presencia == 0)
+
+            {
+
+                _delay_ms(30);
+
+                if (!(PIND & (1 << PD2)))
+
+                    DispararAlarma(ZONA_PRESENCIA);
+
+            }
+
+        }
+
+ 
+
+        // Rearme del LDR para una futura deteccion
+
+        if (ldr > (LDR_UMBRAL + 80))
+
+            ldr_ventana_abierta = 0;
+
+ 
+
+        presencia_anterior = presencia;
+
+        ActualizarSalidas();
+
+        _delay_ms(20);
+
+    }
+
+}
