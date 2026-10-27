@@ -1,575 +1,550 @@
 #define F_CPU 16000000UL
 
- 
-
 #include <avr/io.h>
-
-#include <avr/interrupt.h>
-
 #include <avr/power.h>
-
+#include <avr/interrupt.h>
 #include <util/delay.h>
-
 #include <stdint.h>
 
- 
+#define UMBRAL_LDR 500
 
-/* =====================================================
 
-   PROBLEMA C - ALARMA ANTIRROBO HC-05
+// ======================================================
+// UART
+// ======================================================
 
-   ATmega328P
-
- 
-
-   PC0/A0  LDR ventana
-
-   PD2     PIR/boton presencia (activo en 0)
-
-   PD4     LED verde ARMADO
-
-   PD5     LED rojo ALARMA
-
-   PD6     Buzzer/sirena (por transistor)
-
-   PD0 RX  HC-05 TX
-
-   PD1 TX  HC-05 RX (usar divisor de tension en fisico)
-
- 
-
-   Comandos:
-
-   A = ARMAR
-
-   D = DESARMAR
-
-   S = SILENCIAR
-
-   U = AUTO
-
-   M = MANUAL
-
-   F = FORZAR ALARMA en manual
-
-   E = ESTADO
-
-   ===================================================== */
-
- 
-
-#define LDR_UMBRAL 500
-
- 
-
-static uint8_t armado = 0;
-
-static uint8_t modo_auto = 1;
-
-static uint8_t alarma = 0;
-
-static uint8_t sirena = 0;
-
-static uint8_t presencia_anterior = 1;
-
-static uint8_t ldr_ventana_abierta = 0;
-
- 
-
-typedef enum
-
+void UART_Init(void)
 {
+	UCSR0A = 0;
 
-    ZONA_NINGUNA = 0,
+	// 9600 baudios a 16 MHz
+	UBRR0H = 0;
+	UBRR0L = 103;
 
-    ZONA_VENTANA,
+	UCSR0B = (1 << RXEN0) |
+	(1 << TXEN0);
 
-    ZONA_PRESENCIA,
-
-    ZONA_REMOTA
-
-} zona_t;
-
- 
-
-static zona_t zona = ZONA_NINGUNA;
-
- 
-
-/* ---------------- UART 9600 ---------------- */
-
- 
-
-static void UART_Init(void)
-
-{
-
-    UBRR0H = 0;
-
-    UBRR0L = 103;
-
-    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
-
-    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
-
+	UCSR0C = (1 << UCSZ01) |
+	(1 << UCSZ00);
 }
 
- 
 
-static void UART_EnviarChar(char c)
-
+void UART_Enviar_Char(char dato)
 {
+	while (!(UCSR0A & (1 << UDRE0)));
 
-    while (!(UCSR0A & (1 << UDRE0)));
-
-    UDR0 = c;
-
+	UDR0 = dato;
 }
 
- 
 
-static void UART_EnviarTexto(const char *s)
-
+void UART_Enviar_Texto(const char *texto)
 {
-
-    while (*s) UART_EnviarChar(*s++);
-
+	while (*texto)
+	{
+		UART_Enviar_Char(*texto++);
+	}
 }
 
- 
 
-static uint8_t UART_Disponible(void)
-
+uint8_t UART_Hay_Dato(void)
 {
-
-    return (UCSR0A & (1 << RXC0)) != 0;
-
+	return (UCSR0A & (1 << RXC0));
 }
 
- 
 
-static char UART_LeerChar(void)
-
+char UART_Leer(void)
 {
-
-    return UDR0;
-
+	return UDR0;
 }
 
- 
 
-/* ---------------- ADC ---------------- */
+// ======================================================
+// ADC - LDR
+// ======================================================
 
- 
-
-static void ADC_Init(void)
-
+void ADC_Init(void)
 {
+	// Referencia AVCC
+	ADMUX = (1 << REFS0);
 
-    ADMUX = (1 << REFS0);
-
-    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
-
+	// ADC habilitado - Prescaler 128
+	ADCSRA = (1 << ADEN) |
+	(1 << ADPS2) |
+	(1 << ADPS1) |
+	(1 << ADPS0);
 }
 
- 
 
-static uint16_t ADC_Leer(uint8_t canal)
-
+uint16_t ADC_Leer(uint8_t canal)
 {
+	ADMUX = (ADMUX & 0xF0) |
+	(canal & 0x0F);
 
-    ADMUX = (ADMUX & 0xF0) | (canal & 0x0F);
+	_delay_us(10);
 
-    ADCSRA |= (1 << ADSC);
+	ADCSRA |= (1 << ADSC);
 
-    while (ADCSRA & (1 << ADSC));
+	while (ADCSRA & (1 << ADSC));
 
-    return ADC;
-
+	return ADC;
 }
 
- 
 
-/* ---------------- Salidas ---------------- */
+// ======================================================
+// BUZZER ACTIVO
+// PD6 -> R 1k -> BASE 2N2222
+// ======================================================
 
- 
-
-static void ActualizarSalidas(void)
-
+void Buzzer_Init(void)
 {
+	DDRD |= (1 << PD6);
 
-    if (armado)
-
-        PORTD |= (1 << PD4);
-
-    else
-
-        PORTD &= ~(1 << PD4);
-
- 
-
-    if (alarma)
-
-        PORTD |= (1 << PD5);
-
-    else
-
-        PORTD &= ~(1 << PD5);
-
- 
-
-    if (sirena)
-
-        PORTD |= (1 << PD6);
-
-    else
-
-        PORTD &= ~(1 << PD6);
-
+	PORTD &= ~(1 << PD6);
 }
 
- 
 
-static const char *NombreZona(void)
-
+void Buzzer_ON(void)
 {
-
-    switch (zona)
-
-    {
-
-        case ZONA_VENTANA: return "VENTANA";
-
-        case ZONA_PRESENCIA: return "PRESENCIA";
-
-        case ZONA_REMOTA: return "REMOTA";
-
-        default: return "NINGUNA";
-
-    }
-
+	PORTD |= (1 << PD6);
 }
 
- 
 
-static void ReportarEstado(void)
-
+void Buzzer_OFF(void)
 {
-
-    UART_EnviarTexto("ESTADO:");
-
-    UART_EnviarTexto(armado ? "ARMADO\r\n" : "DESARMADO\r\n");
-
- 
-
-    UART_EnviarTexto("MODO:");
-
-    UART_EnviarTexto(modo_auto ? "AUTO\r\n" : "MANUAL\r\n");
-
- 
-
-    UART_EnviarTexto("ALARMA:");
-
-    UART_EnviarTexto(alarma ? "ON\r\n" : "OFF\r\n");
-
- 
-
-    UART_EnviarTexto("SIRENA:");
-
-    UART_EnviarTexto(sirena ? "ON\r\n" : "OFF\r\n");
-
- 
-
-    UART_EnviarTexto("ZONA:");
-
-    UART_EnviarTexto(NombreZona());
-
-    UART_EnviarTexto("\r\n");
-
+	PORTD &= ~(1 << PD6);
 }
 
- 
 
-static void DispararAlarma(zona_t nueva_zona)
+// ======================================================
+// ACTIVAR ALARMA
+// ======================================================
 
+void Activar_Alarma(const char *zona)
 {
+	// LED verde OFF
+	PORTD &= ~(1 << PD4);
 
-    if (!armado) return;
+	// LED rojo ON
+	PORTD |= (1 << PD5);
 
- 
+	// Buzzer ON
+	Buzzer_ON();
 
-    zona = nueva_zona;
+	UART_Enviar_Texto(
+	"\r\nALARMA:ON\r\n"
+	);
 
-    alarma = 1;
+	UART_Enviar_Texto(
+	"ZONA:"
+	);
 
-    sirena = 1;
+	UART_Enviar_Texto(zona);
 
-    ActualizarSalidas();
-
- 
-
-    UART_EnviarTexto("ALARMA:ON;ZONA:");
-
-    UART_EnviarTexto(NombreZona());
-
-    UART_EnviarTexto("\r\n");
-
+	UART_Enviar_Texto("\r\n");
 }
 
- 
 
-static void Desarmar(void)
+// ======================================================
+// MOSTRAR ESTADO
+// ======================================================
 
+void Mostrar_Estado(uint8_t armado,
+uint8_t modo_auto,
+uint8_t alarma)
 {
+	UART_Enviar_Texto(
+	"\r\n--- ESTADO DEL SISTEMA ---\r\n"
+	);
 
-    armado = 0;
 
-    alarma = 0;
+	// ARMADO / DESARMADO
+	if (armado)
+	{
+		UART_Enviar_Texto(
+		"ESTADO:ARMADO\r\n"
+		);
+	}
+	else
+	{
+		UART_Enviar_Texto(
+		"ESTADO:DESARMADO\r\n"
+		);
+	}
 
-    sirena = 0;
 
-    zona = ZONA_NINGUNA;
+	// AUTO / MANUAL
+	if (modo_auto)
+	{
+		UART_Enviar_Texto(
+		"MODO:AUTO\r\n"
+		);
+	}
+	else
+	{
+		UART_Enviar_Texto(
+		"MODO:MANUAL\r\n"
+		);
+	}
 
-    ActualizarSalidas();
 
-    UART_EnviarTexto("ESTADO:DESARMADO\r\n");
+	// ALARMA
+	if (alarma)
+	{
+		UART_Enviar_Texto(
+		"ALARMA:ON\r\n"
+		);
+	}
+	else
+	{
+		UART_Enviar_Texto(
+		"ALARMA:OFF\r\n"
+		);
+	}
 
+
+	// ESTADO DE LA SIRENA
+	if (PORTD & (1 << PD6))
+	{
+		UART_Enviar_Texto(
+		"SIRENA:ON\r\n"
+		);
+	}
+	else
+	{
+		UART_Enviar_Texto(
+		"SIRENA:OFF\r\n"
+		);
+	}
+
+
+	UART_Enviar_Texto(
+	"--------------------------\r\n"
+	);
 }
 
- 
 
-static void Armar(void)
-
-{
-
-    armado = 1;
-
-    alarma = 0;
-
-    sirena = 0;
-
-    zona = ZONA_NINGUNA;
-
-    ActualizarSalidas();
-
-    UART_EnviarTexto("ESTADO:ARMADO\r\n");
-
-}
-
- 
-
-static void ProcesarComando(char c)
-
-{
-
-    switch (c)
-
-    {
-
-        case 'A':
-
-        case 'a':
-
-            Armar();
-
-            break;
-
- 
-
-        case 'D':
-
-        case 'd':
-
-            Desarmar();
-
-            break;
-
- 
-
-        case 'S':
-
-        case 's':
-
-            // Silencia la sirena sin desarmar ni borrar el evento
-
-            sirena = 0;
-
-            ActualizarSalidas();
-
-            UART_EnviarTexto("SIRENA:OFF\r\n");
-
-            break;
-
- 
-
-        case 'U':
-
-        case 'u':
-
-            modo_auto = 1;
-
-            UART_EnviarTexto("MODO:AUTO\r\n");
-
-            break;
-
- 
-
-        case 'M':
-
-        case 'm':
-
-            modo_auto = 0;
-
-            UART_EnviarTexto("MODO:MANUAL\r\n");
-
-            break;
-
- 
-
-        case 'F':
-
-        case 'f':
-
-            if (!modo_auto && armado)
-
-                DispararAlarma(ZONA_REMOTA);
-
-            break;
-
- 
-
-        case 'E':
-
-        case 'e':
-
-            ReportarEstado();
-
-            break;
-
- 
-
-        default:
-
-            break;
-
-    }
-
-}
-
- 
+// ======================================================
+// MAIN
+// ======================================================
 
 int main(void)
-
 {
+	uint8_t armado = 0;
+	uint8_t alarma = 0;
 
-    uint16_t ldr;
+	// 1 = AUTO
+	// 0 = MANUAL
+	uint8_t modo_auto = 1;
 
-    uint8_t presencia;
+	uint16_t adc_ldr;
 
- 
+	char comando;
 
-    cli();
 
-    clock_prescale_set(clock_div_1);
+	// ==================================================
+	// RELOJ SIN DIVISION
+	// ==================================================
 
-    sei();
+	cli();
 
- 
+	clock_prescale_set(clock_div_1);
 
-    // Presencia PD2 entrada con pull-up
+	sei();
 
-    DDRD &= ~(1 << PD2);
 
-    PORTD |= (1 << PD2);
+	// ==================================================
+	// CONFIGURACION DE PINES
+	// ==================================================
 
- 
+	// PD4 = LED VERDE
+	DDRD |= (1 << PD4);
 
-    // LEDs + buzzer
+	// PD5 = LED ROJO
+	DDRD |= (1 << PD5);
 
-    DDRD |= (1 << PD4) | (1 << PD5) | (1 << PD6);
+	// PD6 = BUZZER
+	DDRD |= (1 << PD6);
 
-    PORTD &= ~((1 << PD4) | (1 << PD5) | (1 << PD6));
+	// PD2 = SENSOR PRESENCIA
+	DDRD &= ~(1 << PD2);
 
- 
+	// Pull-up interno PD2
+	PORTD |= (1 << PD2);
 
-    ADC_Init();
 
-    UART_Init();
+	// LEDs apagados
+	PORTD &= ~(1 << PD4);
+	PORTD &= ~(1 << PD5);
 
- 
+	// Buzzer apagado
+	PORTD &= ~(1 << PD6);
 
-    UART_EnviarTexto("ALARMA HC-05 LISTA\r\n");
 
-    UART_EnviarTexto("A ARMAR | D DESARMAR | S SILENCIAR | U AUTO | M MANUAL | F FORZAR | E ESTADO\r\n");
+	// ==================================================
+	// INICIALIZACIONES
+	// ==================================================
 
- 
+	UART_Init();
 
-    while (1)
+	ADC_Init();
 
-    {
+	Buzzer_Init();
 
-        if (UART_Disponible())
+	_delay_ms(500);
 
-            ProcesarComando(UART_LeerChar());
 
- 
+	// ==================================================
+	// MENU INICIAL
+	// ==================================================
 
-        ldr = ADC_Leer(0);
+	UART_Enviar_Texto(
+	"\r\nSISTEMA DE ALARMA\r\n"
+	);
 
-        presencia = (PIND & (1 << PD2)) ? 1 : 0;
+	UART_Enviar_Texto(
+	"A = ARMAR\r\n"
+	);
 
- 
+	UART_Enviar_Texto(
+	"D = DESARMAR\r\n"
+	);
 
-        if (modo_auto && armado && !alarma)
+	UART_Enviar_Texto(
+	"S = SILENCIAR\r\n"
+	);
 
-        {
+	UART_Enviar_Texto(
+	"U = MODO AUTO\r\n"
+	);
 
-            // LDR: valor bajo = apertura/ventana detectada
+	UART_Enviar_Texto(
+	"M = MODO MANUAL\r\n"
+	);
 
-            if (!ldr_ventana_abierta && ldr < LDR_UMBRAL)
+	UART_Enviar_Texto(
+	"F = FORZAR ALARMA\r\n"
+	);
 
-            {
+	UART_Enviar_Texto(
+	"E = ESTADO\r\n"
+	);
 
-                ldr_ventana_abierta = 1;
+	UART_Enviar_Texto(
+	"\r\nMODO INICIAL:AUTO\r\n"
+	);
 
-                DispararAlarma(ZONA_VENTANA);
 
-            }
+	// ==================================================
+	// BUCLE PRINCIPAL
+	// ==================================================
 
- 
+	while (1)
+	{
+		// ==============================================
+		// COMANDOS UART
+		// ==============================================
 
-            // Presencia: flanco hacia activo, con debounce basico
+		if (UART_Hay_Dato())
+		{
+			comando = UART_Leer();
 
-            if (presencia_anterior == 1 && presencia == 0)
 
-            {
+			// ==========================================
+			// A = ARMAR
+			// ==========================================
 
-                _delay_ms(30);
+			if ((comando == 'A') ||
+			(comando == 'a'))
+			{
+				armado = 1;
+				alarma = 0;
 
-                if (!(PIND & (1 << PD2)))
+				PORTD |= (1 << PD4);
 
-                    DispararAlarma(ZONA_PRESENCIA);
+				PORTD &= ~(1 << PD5);
 
-            }
+				Buzzer_OFF();
 
-        }
+				UART_Enviar_Texto(
+				"\r\nSISTEMA:ARMADO\r\n"
+				);
+			}
 
- 
 
-        // Rearme del LDR para una futura deteccion
+			// ==========================================
+			// D = DESARMAR
+			// ==========================================
 
-        if (ldr > (LDR_UMBRAL + 80))
+			else if ((comando == 'D') ||
+			(comando == 'd'))
+			{
+				armado = 0;
+				alarma = 0;
 
-            ldr_ventana_abierta = 0;
+				PORTD &= ~(1 << PD4);
 
- 
+				PORTD &= ~(1 << PD5);
 
-        presencia_anterior = presencia;
+				Buzzer_OFF();
 
-        ActualizarSalidas();
+				UART_Enviar_Texto(
+				"\r\nSISTEMA:DESARMADO\r\n"
+				);
+			}
 
-        _delay_ms(20);
 
-    }
+			// ==========================================
+			// S = SILENCIAR
+			// ==========================================
 
+			else if ((comando == 'S') ||
+			(comando == 's'))
+			{
+				if (alarma)
+				{
+					Buzzer_OFF();
+
+					UART_Enviar_Texto(
+					"\r\nALARMA:SILENCIADA\r\n"
+					);
+				}
+				else
+				{
+					UART_Enviar_Texto(
+					"\r\nNO HAY ALARMA ACTIVA\r\n"
+					);
+				}
+			}
+
+
+			// ==========================================
+			// U = MODO AUTO
+			// ==========================================
+
+			else if ((comando == 'U') ||
+			(comando == 'u'))
+			{
+				modo_auto = 1;
+
+				UART_Enviar_Texto(
+				"\r\nMODO:AUTO\r\n"
+				);
+			}
+
+
+			// ==========================================
+			// M = MODO MANUAL
+			// ==========================================
+
+			else if ((comando == 'M') ||
+			(comando == 'm'))
+			{
+				modo_auto = 0;
+
+				UART_Enviar_Texto(
+				"\r\nMODO:MANUAL\r\n"
+				);
+			}
+
+
+			// ==========================================
+			// F = FORZAR ALARMA
+			// ==========================================
+
+			else if ((comando == 'F') ||
+			(comando == 'f'))
+			{
+				if (!modo_auto)
+				{
+					if (armado)
+					{
+						alarma = 1;
+
+						Activar_Alarma(
+						"REMOTA"
+						);
+					}
+					else
+					{
+						UART_Enviar_Texto(
+						"\r\nSISTEMA DESARMADO\r\n"
+						);
+					}
+				}
+				else
+				{
+					UART_Enviar_Texto(
+					"\r\nCOMANDO SOLO EN MANUAL\r\n"
+					);
+				}
+			}
+
+
+			// ==========================================
+			// E = CONSULTAR ESTADO
+			// ==========================================
+
+			else if ((comando == 'E') ||
+			(comando == 'e'))
+			{
+				Mostrar_Estado(
+				armado,
+				modo_auto,
+				alarma
+				);
+			}
+		}
+
+
+		// ==============================================
+		// LEER LDR
+		// ==============================================
+
+		adc_ldr = ADC_Leer(0);
+
+
+		// ==============================================
+		// MODO AUTOMATICO
+		// ==============================================
+
+		if (modo_auto &&
+		armado &&
+		!alarma)
+		{
+			// ==========================================
+			// LDR - APERTURA
+			// ==========================================
+
+			if (adc_ldr > UMBRAL_LDR)
+			{
+				alarma = 1;
+
+				Activar_Alarma(
+				"VENTANA"
+				);
+			}
+
+
+			// ==========================================
+			// PRESENCIA - PD2
+			// ==========================================
+
+			else if (!(PIND & (1 << PD2)))
+			{
+				_delay_ms(30);
+
+				if (!(PIND & (1 << PD2)))
+				{
+					alarma = 1;
+
+					Activar_Alarma(
+					"MOVIMIENTO"
+					);
+				}
+			}
+		}
+
+
+		_delay_ms(50);
+	}
 }
