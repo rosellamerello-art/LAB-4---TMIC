@@ -228,6 +228,137 @@ static void MostrarSecuencia(uint8_t nivel)
     }
 }
 
+/*=Modo Libre=*/
+
+static void ModoLibre(void)
+{
+    uint8_t fila = 3;
+    uint8_t columna = 3;
+    uint8_t posicionActual;
+
+    uint8_t colorCursor = COLOR_AZUL;
+    uint8_t nuevoColor;
+
+    uint8_t movimientoPermitido = 1;
+
+    uint16_t ejeX;
+    uint16_t ejeY;
+
+    uint8_t tiempo;
+
+    posicionActual = fila * 8 + columna;
+
+    MostrarPixelColor(
+        posicionActual,
+        colorCursor
+    );
+
+    // Modo libre durante unos 4 segundos
+    for (tiempo = 0; tiempo < 80; tiempo++)
+    {
+        ejeX = ADC_Leer(0);
+        ejeY = ADC_Leer(1);
+
+        // DERECHA
+        if (movimientoPermitido && ejeX > 700)
+        {
+            if (columna < 7)
+                columna++;
+
+            movimientoPermitido = 0;
+        }
+
+        // IZQUIERDA
+        else if (movimientoPermitido && ejeX < 300)
+        {
+            if (columna > 0)
+                columna--;
+
+            movimientoPermitido = 0;
+        }
+
+        // ABAJO
+        else if (movimientoPermitido && ejeY < 300)
+        {
+            if (fila < 7)
+                fila++;
+
+            movimientoPermitido = 0;
+        }
+
+        // ARRIBA
+        else if (movimientoPermitido && ejeY > 700)
+        {
+            if (fila > 0)
+                fila--;
+
+            movimientoPermitido = 0;
+        }
+
+        posicionActual =
+            fila * 8 + columna;
+
+        MostrarPixelColor(
+            posicionActual,
+            colorCursor
+        );
+
+        // Joystick vuelve al centro
+        if (
+            ejeX >= 300 &&
+            ejeX <= 700 &&
+            ejeY >= 300 &&
+            ejeY <= 700
+        )
+        {
+            movimientoPermitido = 1;
+        }
+
+        // D2 EN MODO LIBRE = CAMBIAR COLOR
+        if (!(PIND & (1 << PD2)))
+        {
+            _delay_ms(30);
+
+            if (!(PIND & (1 << PD2)))
+            {
+                do
+                {
+                    nuevoColor =
+                        ColorAleatorio();
+
+                } while (
+                    nuevoColor ==
+                    colorCursor
+                );
+
+                colorCursor =
+                    nuevoColor;
+
+                MostrarPixelColor(
+                    posicionActual,
+                    colorCursor
+                );
+
+                Buzzer_Iniciar(
+                    colorCursor
+                );
+
+                _delay_ms(150);
+
+                Buzzer_Parar();
+
+                while (!(PIND & (1 << PD2)));
+
+                _delay_ms(50);
+            }
+        }
+
+        _delay_ms(50);
+    }
+
+    ApagarMatriz();
+    _delay_ms(300);
+}
 int main(void)
 {
     uint8_t nivel;
